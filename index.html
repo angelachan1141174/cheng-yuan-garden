@@ -1,0 +1,1440 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>誠園藝境 CHENG YUAN GARDEN</title>
+<meta name="description" content="誠園藝境 線上點餐系統" />
+
+<!-- 提前跟這些網域建立連線,加快後面資源的載入速度 -->
+<link rel="preconnect" href="https://esm.sh" crossorigin />
+<link rel="preconnect" href="https://www.gstatic.com" crossorigin />
+<link rel="preconnect" href="https://unpkg.com" crossorigin />
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
+<!-- 字型改用一般 link 標籤並行載入,比放在 CSS @import 裡快 -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Work+Sans:wght@400;500&family=Space+Mono:wght@400;700&display=swap" />
+
+<style>
+  html, body { margin: 0; padding: 0; background: #F6F2E9; }
+  #root:empty::before {
+    content: "載入中…";
+    display: block;
+    text-align: center;
+    padding-top: 40vh;
+    font-family: system-ui, sans-serif;
+    color: #8a7e6f;
+  }
+</style>
+
+<!-- Tailwind CSS (Play CDN, 免建置) -->
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+
+<!-- Babel Standalone:讓瀏覽器直接讀懂 JSX,不需要打包工具 -->
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- Import Map:把 React / lucide-react / Firebase 對應到瀏覽器可直接讀取的 ES Module 網址 -->
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+    "react/jsx-dev-runtime": "https://esm.sh/react@18.3.1/jsx-dev-runtime",
+    "react-dom-client": "https://esm.sh/react-dom@18.3.1/client",
+    "lucide-react": "https://esm.sh/lucide-react@0.383.0?deps=react@18.3.1",
+    "firebase-app": "https://www.gstatic.com/firebasejs/12.9.0/firebase-app.js",
+    "firebase-database": "https://www.gstatic.com/firebasejs/12.9.0/firebase-database.js"
+  }
+}
+</script>
+<link rel="icon" href="data:," />
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react" data-type="module">
+import React, { useState, useEffect, useCallback } from 'react';
+import { createRoot } from 'react-dom-client';
+import {
+  Flame, Sofa, Coffee, Croissant, Building2, ShoppingCart, X, Plus, Minus,
+  ChefHat, CheckCircle2, Clock, RefreshCw, ArrowLeft, StickyNote, Users, MapPin, Receipt, ArrowLeftRight, Trash2, Lock
+} from 'lucide-react';
+import { initializeApp } from 'firebase-app';
+import { getDatabase, ref, get, set, onValue } from 'firebase-database';
+
+/* ---------------------------------------------------------------
+   店面格局資料 —— 依實際平面圖:上面三間獨立店面,下面一間大廳
+   每張桌子座標 x/y/w/h 為該房間內的相對百分比 (0-100)
+--------------------------------------------------------------- */
+
+const ROOMS = [
+  {
+    // 進門左右兩側各一小桌(橫向並排,4~5人),後方一大桌(8人)
+    id: 'booth', name: '包廂區', short: 'A區', tint: '#6B7A4F', icon: Sofa,
+    flex: 1.2,
+    tables: [
+      { id: 'A1', seats: 4, x: 4,  y: 58, w: 34, h: 34 },
+      { id: 'A2', seats: 5, x: 62, y: 58, w: 34, h: 34 },
+      { id: 'A3', seats: 8, x: 34, y: 6,  w: 32, h: 50 },
+    ],
+  },
+  {
+    // 進門左右兩側各一縱向小桌(4~5人),後方中間一大桌(9人)
+    id: 'cafe', name: '咖啡茶飲區', short: 'B區', tint: '#8B5E34', icon: Coffee,
+    flex: 1.2,
+    tables: [
+      { id: 'B1', seats: 5, x: 8,  y: 56, w: 18, h: 40 },
+      { id: 'B2', seats: 4, x: 74, y: 56, w: 18, h: 40 },
+      { id: 'B3', seats: 9, x: 33, y: 2,  w: 34, h: 50 },
+    ],
+  },
+  {
+    // 進門左手邊貼牆,一整排 3 個位置
+    id: 'bread', name: '麵包區', short: 'C區', tint: '#C89B3C', icon: Croissant,
+    flex: 0.6,
+    tables: [
+      { id: 'C1', seats: 3, x: 12, y: 8, w: 22, h: 84 },
+    ],
+  },
+];
+
+// 場地租借區:大空間彈性運用,不需要指定桌位
+const HALL = {
+  id: 'venue', name: '場地租借區', short: 'D區', tint: '#7C8471', icon: Building2,
+  flex: 1.8,
+  noTableSelect: true,
+  tables: [],
+};
+
+const ALL_ROOMS = [...ROOMS, HALL];
+const roomById = Object.fromEntries(ALL_ROOMS.map((r) => [r.id, r]));
+
+const CATS = [
+  { id: 'pizza', label: '窯烤披薩' },
+  { id: 'pasta', label: '義大利麵/焗飯' },
+  { id: 'bread', label: '麵包' },
+  { id: 'tea',    label: '茶飲' },
+  { id: 'coffee', label: '咖啡' },
+];
+
+const MENU = [
+  // 窯烤披薩(每份 $180,DIY 另計)
+  { id: 'p1',  cat: 'pizza', name: '起司披薩',   desc: '經典原味,滿滿起司', price: 180 },
+  { id: 'p2',  cat: 'pizza', name: '總匯披薩',   desc: '多種配料綜合口味', price: 180 },
+  { id: 'p3',  cat: 'pizza', name: '德式香腸披薩', desc: '德式香腸、洋蔥', price: 180 },
+  { id: 'p4',  cat: 'pizza', name: '羅勒燻雞披薩', desc: '煙燻雞肉、新鮮羅勒', price: 180 },
+  { id: 'p5',  cat: 'pizza', name: '塔香皮蛋披薩', desc: '九層塔、皮蛋,特色口味', price: 180 },
+  { id: 'p6',  cat: 'pizza', name: '田園蔬菜披薩', desc: '當季蔬菜,清爽口味', price: 180 },
+  { id: 'p7',  cat: 'pizza', name: '蔓越莓披薩', desc: '蔓越莓乾、起司,酸甜口味', price: 180 },
+  { id: 'p8',  cat: 'pizza', name: '南瓜披薩',   desc: '南瓜泥、起司', price: 180 },
+  { id: 'p9',  cat: 'pizza', name: '隱藏版披薩', desc: '每日限定,口味隨當天供應', price: 180 },
+  { id: 'p10', cat: 'pizza', name: 'DIY披薩',    desc: '自選配料,現點現做', price: 200 },
+
+  // 義大利麵/焗飯
+  { id: 'n1', cat: 'pasta', name: '白醬義大利麵', desc: '香濃白醬', price: 140 },
+  { id: 'n2', cat: 'pasta', name: '青炒義大利麵', desc: '蒜香清炒', price: 140 },
+  { id: 'n3', cat: 'pasta', name: '肉醬義大利麵', desc: '純豬肉肉醬', price: 180 },
+  { id: 'n4', cat: 'pasta', name: '咖哩焗烤飯',   desc: '香濃咖哩、烤起司', price: 160 },
+
+  // 麵包
+  { id: 'b1', cat: 'bread', name: '歐式麵包', desc: '' , price: 120 },
+  { id: 'b2', cat: 'bread', name: '一般麵包', desc: '', price: 60 },
+  { id: 'b3', cat: 'bread', name: '小麵包',   desc: '', price: 40 },
+  { id: 'b4', cat: 'bread', name: '原味吐司', desc: '', price: 80 },
+  { id: 'b5', cat: 'bread', name: '南瓜吐司', desc: '', price: 100 },
+
+  // 茶飲(杯裝/壺裝)
+  { id: 't1',  cat: 'tea', name: '烏龍茶(杯裝)', desc: '', price: 40 },
+  { id: 't2',  cat: 'tea', name: '烏龍茶(壺裝)', desc: '', price: 70 },
+  { id: 't3',  cat: 'tea', name: '老紅茶(杯裝)', desc: '', price: 50 },
+  { id: 't4',  cat: 'tea', name: '老紅茶(壺裝)', desc: '', price: 90 },
+  { id: 't5',  cat: 'tea', name: '紅茶(杯裝)',   desc: '', price: 40 },
+  { id: 't6',  cat: 'tea', name: '紅茶(壺裝)',   desc: '', price: 70 },
+  { id: 't7',  cat: 'tea', name: '老茶(杯裝)',   desc: '', price: 50 },
+  { id: 't8',  cat: 'tea', name: '老茶(壺裝)',   desc: '', price: 90 },
+  { id: 't9',  cat: 'tea', name: '奶茶(杯裝)',   desc: '', price: 60 },
+  { id: 't10', cat: 'tea', name: '奶茶(壺裝)',   desc: '', price: 120 },
+
+  // 咖啡
+  { id: 'c1', cat: 'coffee', name: '虹吸咖啡', desc: '只提供熱飲・一杯', price: 80 },
+  { id: 'c2', cat: 'coffee', name: '濃縮咖啡', desc: '只提供熱飲・一杯', price: 100 },
+  { id: 'c3', cat: 'coffee', name: '拿鐵',     desc: '冰・熱皆可,一杯 $90', price: 90 },
+];
+
+// 依 id 快速查詢品項所屬分類(即使日後菜單異動,舊訂單仍可對照到當時的分類)
+const MENU_BY_ID = Object.fromEntries(MENU.map((m) => [m.id, m]));
+const CAT_LABEL = Object.fromEntries(CATS.map((c) => [c.id, c.label]));
+CAT_LABEL.other = '其他';
+
+// 結帳彙總:計算總營收、總份數,並依分類、品項細分統計
+function computeCheckoutSummary(orders) {
+  const catTotals = {};
+  let total = 0;
+  let itemCount = 0;
+  orders.forEach((o) => {
+    (o.items || []).forEach((it) => {
+      const menuItem = MENU_BY_ID[it.id];
+      const catId = menuItem ? menuItem.cat : 'other';
+      const revenue = it.price * it.qty;
+      total += revenue;
+      itemCount += it.qty;
+      if (!catTotals[catId]) catTotals[catId] = { revenue: 0, qty: 0, items: {} };
+      catTotals[catId].revenue += revenue;
+      catTotals[catId].qty += it.qty;
+      if (!catTotals[catId].items[it.id]) catTotals[catId].items[it.id] = { name: it.name, qty: 0, revenue: 0 };
+      catTotals[catId].items[it.id].qty += it.qty;
+      catTotals[catId].items[it.id].revenue += revenue;
+    });
+  });
+  return { total, itemCount, orderCount: orders.length, catTotals };
+}
+
+// 後台密碼
+const ADMIN_PASSWORD = '1108';
+
+const STATUS_FLOW = ['pending', 'preparing', 'done'];
+const STATUS_LABEL = { pending: '新訂單', preparing: '製作中', done: '已完成' };
+const ITEM_STATUS_LABEL = { pending: '待處理', preparing: '製作中', done: '已完成' };
+const STATUS_STYLE = {
+  pending:   { bg: '#FBEFE6', fg: '#C1440E', border: '#E9C7AE' },
+  preparing: { bg: '#F1EEDD', fg: '#8A6D3B', border: '#DCD2AE' },
+  done:      { bg: '#EAEFE2', fg: '#5B6B41', border: '#C8D3B4' },
+};
+
+// 依訂單內每個品項的狀態,推算整筆訂單的彙總狀態(全部完成才算完成、有任何一項在做就算製作中)
+function orderStatus(order) {
+  const statuses = (order.items || []).map((it) => it.status || 'pending');
+  if (statuses.length === 0) return 'pending';
+  if (statuses.every((s) => s === 'done')) return 'done';
+  if (statuses.some((s) => s === 'preparing' || s === 'done')) return 'preparing';
+  return 'pending';
+}
+
+const money = (n) => `NT$${n.toLocaleString()}`;
+
+/* ---------------------------------------------------------------
+   訂單儲存:改用 Firebase Realtime Database,讓客人下單、後台管理
+   在不同裝置之間即時同步(不再依賴 Claude 專屬的 window.storage)。
+--------------------------------------------------------------- */
+const firebaseConfig = {
+  apiKey: "AIzaSyB0KEEeNAQU0BLisNvs2ps7UcNPfWvatv0",
+  authDomain: "chen-1da65.firebaseapp.com",
+  databaseURL: "https://chen-1da65-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "chen-1da65",
+  storageBucket: "chen-1da65.firebasestorage.app",
+  messagingSenderId: "551941674936",
+  appId: "1:551941674936:web:bc21df46ad0b6b957f614d",
+};
+const fbApp = initializeApp(firebaseConfig);
+const db = getDatabase(fbApp);
+const ordersRef = ref(db, 'orders');
+
+async function loadOrders() {
+  const snap = await get(ordersRef);
+  return snap.val() || [];
+}
+
+async function saveOrders(list) {
+  try {
+    await set(ordersRef, list);
+    return true;
+  } catch (e) {
+    console.error('寫入 Firebase 失敗:', e);
+    return false;
+  }
+}
+
+// 讓後台可以訂閱即時更新(任何裝置一有變動,這裡會馬上收到最新資料)
+function subscribeOrders(callback, onError) {
+  return onValue(
+    ordersRef,
+    (snap) => callback(snap.val() || []),
+    (err) => { if (onError) onError(err); }
+  );
+}
+
+
+/* ---------------------------------------------------------------
+   座位平面圖繪製工具
+--------------------------------------------------------------- */
+
+
+function TableShape({ table, tint, selected, onClick, interactive }) {
+  return (
+    <div
+      role={interactive ? 'button' : undefined}
+      onClick={interactive ? () => onClick(table.id) : undefined}
+      className="absolute"
+      style={{
+        left: `${table.x}%`, top: `${table.y}%`, width: `${table.w}%`, height: `${table.h}%`,
+        cursor: interactive ? 'pointer' : 'default',
+      }}
+    >
+      <div
+        className="w-full h-full rounded-md flex items-center justify-center transition-colors"
+        style={{
+          background: selected ? tint : '#D9D2C2',
+          border: selected ? `2px solid ${tint}` : '1px solid #C7BFAC',
+        }}
+      >
+        {interactive && (
+          <span
+            style={{
+              fontFamily: 'var(--font-utility)', fontSize: 10.5,
+              color: selected ? '#fff' : '#5c5445',
+            }}
+          >
+            {table.id}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RoomCard({ room, onPick, grow }) {
+  const Icon = room.icon;
+  return (
+    <button
+      onClick={() => onPick(room.id)}
+      className="text-left rounded-xl overflow-hidden focus:outline-none focus:ring-2 transition-transform hover:-translate-y-0.5"
+      style={{
+        flex: grow ? `${room.flex} 1 0%` : undefined,
+        width: grow ? undefined : '100%',
+        background: 'var(--card)', border: '1px solid var(--line)',
+        boxShadow: '0 4px 14px rgba(43,36,32,0.06)', outlineColor: room.tint,
+      }}
+    >
+      <div className="flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 sm:py-2" style={{ borderBottom: '1px solid var(--line)' }}>
+        <Icon size={13} color={room.tint} className="shrink-0" />
+        <span style={{ fontFamily: 'var(--font-utility)', fontSize: 10.5, color: 'var(--ash)' }} className="truncate">
+          <span className="hidden sm:inline">{room.short} · </span>{room.name}
+        </span>
+      </div>
+      <div className="relative" style={{ paddingTop: grow ? '58%' : '34%', background: '#F6F2E9' }}>
+        <div className="absolute inset-0 p-1.5 sm:p-2">
+          {room.tables.length > 0 ? (
+            <div className="relative w-full h-full">
+              {room.tables.map((t) => (
+                <TableShape key={t.id} table={t} tint={room.tint} interactive={false} />
+              ))}
+            </div>
+          ) : (
+            <div className="w-full h-full rounded-md flex flex-col items-center justify-center gap-1" style={{ border: `1.5px dashed ${room.tint}66` }}>
+              <Icon size={18} color={room.tint} />
+              <span style={{ fontFamily: 'var(--font-utility)', fontSize: 10, color: room.tint }}>彈性座位・免選位</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function FloorPlanScreen({ onPickRoom }) {
+  return (
+    <div className="max-w-6xl mx-auto px-5 py-8">
+      <div className="text-center mb-7">
+        <div style={{ fontFamily: 'var(--font-utility)', fontSize: 11, letterSpacing: '0.3em', color: 'var(--ember)' }}>FLOOR PLAN · 平面圖</div>
+        <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 30, color: 'var(--ash)' }} className="mt-2">今天,坐在哪一區?</h1>
+        <p style={{ color: '#6b6154', fontFamily: 'var(--font-body)' }} className="mt-2 text-sm">點選您所在的店面,再從裡面挑選實際的桌位</p>
+      </div>
+
+      <div className="flex flex-row gap-2 sm:gap-3 mb-2 sm:mb-3">
+        {ROOMS.map((r) => (
+          <RoomCard key={r.id} room={r} onPick={onPickRoom} grow />
+        ))}
+      </div>
+      <RoomCard room={HALL} onPick={onPickRoom} />
+
+      <div className="flex items-center justify-center gap-4 mt-6 flex-wrap">
+        {ALL_ROOMS.map((r) => (
+          <div key={r.id} className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-full" style={{ background: r.tint }} />
+            <span style={{ fontFamily: 'var(--font-utility)', fontSize: 11, color: '#8a7e6f' }}>{r.short}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TablePickScreen({ roomId, onBack, onPickTable }) {
+  const room = roomById[roomId];
+  const Icon = room.icon;
+  const [hovered, setHovered] = useState(null);
+
+  return (
+    <div className="max-w-2xl mx-auto px-5 py-6">
+      <button onClick={onBack} className="flex items-center gap-1.5 mb-5" style={{ color: 'var(--olive)', fontFamily: 'var(--font-utility)', fontSize: 12.5 }}>
+        <ArrowLeft size={14} /> 回到平面圖
+      </button>
+
+      <div className="flex items-center gap-2 mb-1">
+        <Icon size={19} color={room.tint} />
+        <span style={{ fontFamily: 'var(--font-display)', fontSize: 22, color: 'var(--ash)' }}>{room.name}</span>
+      </div>
+      <p style={{ fontFamily: 'var(--font-body)', fontSize: 13, color: '#8a7e6f' }} className="mb-4">點選您實際坐的那一桌</p>
+
+      <div
+        className="relative rounded-xl p-4"
+        style={{ background: '#F6F2E9', border: '1px solid var(--line)' }}
+      >
+        <div className="relative w-full" style={{ paddingTop: '62%' }}>
+          <div className="absolute inset-0">
+            {room.tables.map((t) => (
+              <TableShape
+                key={t.id}
+                table={t}
+                tint={room.tint}
+                interactive
+                selected={hovered === t.id}
+                onClick={(id) => onPickTable(room.id, id)}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-4">
+        {room.tables.map((t) => (
+          <button
+            key={t.id}
+            onMouseEnter={() => setHovered(t.id)}
+            onMouseLeave={() => setHovered(null)}
+            onClick={() => onPickTable(room.id, t.id)}
+            className="flex items-center justify-between px-3.5 py-2.5 rounded-lg"
+            style={{ background: 'var(--card)', border: '1px solid var(--line)' }}
+          >
+            <span style={{ fontFamily: 'var(--font-utility)', fontSize: 13, color: 'var(--ash)' }}>{t.id}</span>
+            <span className="flex items-center gap-1" style={{ fontFamily: 'var(--font-body)', fontSize: 12, color: '#8a7e6f' }}>
+              <Users size={12} /> {t.seats}
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SeatNoteScreen({ roomId, tableId, value, onChange, onBack, onContinue }) {
+  const room = roomById[roomId];
+  const Icon = room.icon;
+  const label = tableId ? `${room.name} · ${tableId}` : room.name;
+
+  return (
+    <div className="max-w-md mx-auto px-5 py-8">
+      <button onClick={onBack} className="flex items-center gap-1.5 mb-5" style={{ color: 'var(--olive)', fontFamily: 'var(--font-utility)', fontSize: 12.5 }}>
+        <ArrowLeft size={14} /> 上一步
+      </button>
+
+      <div className="flex items-center gap-2 mb-1">
+        <Icon size={19} color={room.tint} />
+        <span style={{ fontFamily: 'var(--font-display)', fontSize: 22, color: 'var(--ash)' }}>{label}</span>
+      </div>
+      <p style={{ fontFamily: 'var(--font-body)', fontSize: 13, color: '#8a7e6f' }} className="mb-5 leading-relaxed">
+        座位實際位置若有調整,可以在這裡先跟我們說一聲(選填)
+      </p>
+
+      <label className="flex items-center gap-1.5 mb-1.5" style={{ fontFamily: 'var(--font-utility)', fontSize: 11.5, color: 'var(--olive)' }}>
+        <MapPin size={13} /> 位置備註
+      </label>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="例如:併桌、靠近走道、有帶嬰兒車、實際坐在隔壁桌…"
+        rows={4}
+        className="w-full rounded-lg px-3.5 py-3 text-sm resize-none focus:outline-none"
+        style={{ background: 'var(--card)', border: '1px solid var(--line)', fontFamily: 'var(--font-body)', color: 'var(--ash)' }}
+      />
+
+      <button
+        onClick={onContinue}
+        className="w-full mt-6 py-3 rounded-full"
+        style={{ background: 'var(--ember)', color: '#fff', fontFamily: 'var(--font-utility)', fontSize: 14, letterSpacing: '0.05em' }}
+      >
+        {value.trim() ? '確認,開始點餐' : '沒有備註,直接點餐'}
+      </button>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------
+   小元件
+--------------------------------------------------------------- */
+
+function Logo({ size = 34 }) {
+  return (
+    <div className="flex items-center gap-2">
+      <div
+        style={{
+          width: size, height: size, borderRadius: '50%',
+          background: 'radial-gradient(circle at 35% 30%, #E8A23B, #C1440E 70%)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          boxShadow: '0 2px 8px rgba(193,68,14,0.35)'
+        }}
+      >
+        <Flame size={size * 0.55} color="#2B2420" strokeWidth={2.4} />
+      </div>
+      <div className="leading-tight">
+        <div style={{ fontFamily: 'var(--font-display)', fontSize: 19, color: 'var(--ash)', letterSpacing: '0.02em' }}>誠園藝境</div>
+        <div style={{ fontFamily: 'var(--font-utility)', fontSize: 10, letterSpacing: '0.22em', color: 'var(--olive)' }}>CHENG YUAN GARDEN</div>
+      </div>
+    </div>
+  );
+}
+
+function MenuItemCard({ item, qty, onAdd, onRemove }) {
+  return (
+    <div
+      className="rounded-xl p-4 flex items-center justify-between gap-4"
+      style={{ background: 'var(--card)', border: '1px solid var(--line)' }}
+    >
+      <div className="min-w-0">
+        <div style={{ fontFamily: 'var(--font-display)', fontSize: 16.5, color: 'var(--ash)' }}>{item.name}</div>
+        <div style={{ fontFamily: 'var(--font-body)', fontSize: 12.5, color: '#8a7e6f' }} className="mt-1 truncate">{item.desc}</div>
+        <div style={{ fontFamily: 'var(--font-utility)', fontSize: 13.5, color: 'var(--gold-dark)' }} className="mt-2">{money(item.price)}</div>
+      </div>
+      {qty > 0 ? (
+        <div className="flex items-center gap-2 shrink-0">
+          <button onClick={onRemove} className="w-8 h-8 rounded-full flex items-center justify-center" style={{ background: 'var(--limewash)', color: 'var(--ash)' }} aria-label={`減少 ${item.name}`}>
+            <Minus size={15} />
+          </button>
+          <span style={{ fontFamily: 'var(--font-utility)', minWidth: 16, textAlign: 'center' }}>{qty}</span>
+          <button onClick={onAdd} className="w-8 h-8 rounded-full flex items-center justify-center" style={{ background: 'var(--ember)', color: '#fff' }} aria-label={`增加 ${item.name}`}>
+            <Plus size={15} />
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={onAdd}
+          className="shrink-0 px-3.5 py-2 rounded-full flex items-center gap-1.5"
+          style={{ background: 'var(--limewash)', color: 'var(--ash)', fontFamily: 'var(--font-utility)', fontSize: 12.5 }}
+        >
+          <Plus size={14} /> 加入
+        </button>
+      )}
+    </div>
+  );
+}
+
+function CartDrawer({ open, onClose, cart, menuById, onAdd, onRemove, note, setNote, onSubmit, submitting, seatLabel, seatNote, error }) {
+  const items = Object.entries(cart).filter(([id, q]) => q > 0 && menuById[id]);
+  const total = items.reduce((s, [id, q]) => s + menuById[id].price * q, 0);
+
+  return (
+    <div className={`fixed inset-0 z-40 transition-opacity ${open ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'}`}>
+      <div className="absolute inset-0" style={{ background: 'rgba(43,36,32,0.4)' }} onClick={onClose} />
+      <div
+        className="absolute right-0 top-0 bottom-0 w-full sm:w-[420px] flex flex-col"
+        style={{ background: 'var(--paper)', transform: open ? 'translateX(0)' : 'translateX(100%)', transition: 'transform 0.3s ease' }}
+      >
+        <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid var(--line)' }}>
+          <div style={{ fontFamily: 'var(--font-display)', fontSize: 19, color: 'var(--ash)' }}>您的訂單</div>
+          <button onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-full" style={{ background: 'var(--limewash)' }}>
+            <X size={16} />
+          </button>
+        </div>
+        <div style={{ fontFamily: 'var(--font-utility)', fontSize: 12, color: 'var(--olive)' }} className="px-5 pt-3 tracking-wide">座位:{seatLabel}</div>
+        {seatNote && (
+          <div className="px-5 pt-1.5 flex items-start gap-1.5" style={{ fontFamily: 'var(--font-body)', fontSize: 12, color: '#8a7e6f' }}>
+            <MapPin size={12} className="mt-0.5 shrink-0" /> {seatNote}
+          </div>
+        )}
+
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
+          {items.length === 0 && (
+            <div className="text-center py-16" style={{ color: '#a89b8a', fontFamily: 'var(--font-body)', fontSize: 14 }}>
+              購物車還是空的,去菜單看看吧
+            </div>
+          )}
+          {items.map(([id, q]) => {
+            const it = menuById[id];
+            return (
+              <div key={id} className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div style={{ fontFamily: 'var(--font-body)', fontSize: 14, color: 'var(--ash)' }} className="truncate">{it.name}</div>
+                  <div style={{ fontFamily: 'var(--font-utility)', fontSize: 12, color: '#8a7e6f' }}>{money(it.price)} × {q}</div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button onClick={() => onRemove(id)} className="w-7 h-7 rounded-full flex items-center justify-center" style={{ background: 'var(--limewash)' }}><Minus size={13} /></button>
+                  <span style={{ minWidth: 14, textAlign: 'center', fontFamily: 'var(--font-utility)', fontSize: 13 }}>{q}</span>
+                  <button onClick={() => onAdd(id)} className="w-7 h-7 rounded-full flex items-center justify-center" style={{ background: 'var(--ember)', color: '#fff' }}><Plus size={13} /></button>
+                </div>
+              </div>
+            );
+          })}
+
+          {items.length > 0 && (
+            <div className="pt-2">
+              <label className="flex items-center gap-1.5 mb-1.5" style={{ fontFamily: 'var(--font-utility)', fontSize: 11.5, color: 'var(--olive)' }}>
+                <StickyNote size={13} /> 備註(選填)
+              </label>
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="例如:不加洋蔥、餐點分開上"
+                rows={2}
+                className="w-full rounded-lg px-3 py-2 text-sm resize-none focus:outline-none"
+                style={{ background: 'var(--card)', border: '1px solid var(--line)', fontFamily: 'var(--font-body)' }}
+              />
+            </div>
+          )}
+        </div>
+
+        <div className="px-5 py-4" style={{ borderTop: '1px solid var(--line)' }}>
+          {error && (
+            <div className="mb-3 px-3 py-2 rounded-lg text-xs" style={{ background: '#FBEFE6', color: 'var(--ember)', fontFamily: 'var(--font-body)' }}>
+              {error}
+            </div>
+          )}
+          <div className="flex items-center justify-between mb-3">
+            <span style={{ fontFamily: 'var(--font-body)', fontSize: 14, color: '#6b6154' }}>總計</span>
+            <span style={{ fontFamily: 'var(--font-display)', fontSize: 22, color: 'var(--ash)' }}>{money(total)}</span>
+          </div>
+          <button
+            disabled={items.length === 0 || submitting}
+            onClick={onSubmit}
+            className="w-full py-3 rounded-full flex items-center justify-center gap-2 disabled:opacity-40"
+            style={{ background: 'var(--ember)', color: '#fff', fontFamily: 'var(--font-utility)', fontSize: 14, letterSpacing: '0.05em' }}
+          >
+            {submitting ? '送出中…' : '送出訂單'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuickSwitchModal({ open, onClose, onSwitch, currentRoomId, currentTableId }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50">
+      <div className="absolute inset-0" style={{ background: 'rgba(43,36,32,0.45)' }} onClick={onClose} />
+      <div
+        className="absolute left-0 right-0 bottom-0 sm:left-1/2 sm:top-1/2 sm:right-auto sm:bottom-auto sm:-translate-x-1/2 sm:-translate-y-1/2 sm:w-[480px] sm:rounded-2xl rounded-t-2xl max-h-[80vh] overflow-y-auto"
+        style={{ background: 'var(--paper)', border: '1px solid var(--line)' }}
+      >
+        <div className="flex items-center justify-between px-5 py-4 sticky top-0" style={{ background: 'var(--paper)', borderBottom: '1px solid var(--line)' }}>
+          <div style={{ fontFamily: 'var(--font-display)', fontSize: 18, color: 'var(--ash)' }}>切換座位</div>
+          <button onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-full" style={{ background: 'var(--limewash)' }}>
+            <X size={16} />
+          </button>
+        </div>
+        <div className="px-5 py-4">
+          {ALL_ROOMS.map((room) => (
+            <div key={room.id} className="mb-5">
+              <div className="flex items-center gap-1.5 mb-2">
+                <room.icon size={14} color={room.tint} />
+                <span style={{ fontFamily: 'var(--font-utility)', fontSize: 12, color: 'var(--ash)' }}>{room.short} · {room.name}</span>
+              </div>
+              {room.tables.length > 0 ? (
+                <div className="grid grid-cols-4 gap-2">
+                  {room.tables.map((t) => {
+                    const isCurrent = room.id === currentRoomId && t.id === currentTableId;
+                    return (
+                      <button
+                        key={t.id}
+                        onClick={() => onSwitch(room.id, t.id)}
+                        className="py-2.5 rounded-lg"
+                        style={{
+                          fontFamily: 'var(--font-utility)', fontSize: 12.5,
+                          background: isCurrent ? room.tint : 'var(--card)',
+                          color: isCurrent ? '#fff' : 'var(--ash)',
+                          border: `1px solid ${isCurrent ? room.tint : 'var(--line)'}`,
+                        }}
+                      >
+                        {t.id}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <button
+                  onClick={() => onSwitch(room.id, null)}
+                  className="w-full py-2.5 rounded-lg"
+                  style={{
+                    fontFamily: 'var(--font-utility)', fontSize: 12.5,
+                    background: room.id === currentRoomId ? room.tint : 'var(--card)',
+                    color: room.id === currentRoomId ? '#fff' : 'var(--ash)',
+                    border: `1px solid ${room.id === currentRoomId ? room.tint : 'var(--line)'}`,
+                  }}
+                >
+                  進入這一區(不分桌)
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OrderScreen({ roomId, tableId, seatNote, cart, setCart, activeOrderId, onBack, onSwitchTable, onOrdered }) {
+  const room = roomById[roomId];
+  const seatLabel = tableId ? `${room.name} · ${tableId}` : room.name;
+  const [activeCat, setActiveCat] = useState('pizza');
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [note, setNote] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const [switchOpen, setSwitchOpen] = useState(false);
+  const menuById = Object.fromEntries(MENU.map((m) => [m.id, m]));
+
+  // 切換到別桌時,清掉這一桌專屬的暫存狀態(備註草稿、開著的購物車、錯誤訊息)
+  useEffect(() => {
+    setNote('');
+    setDrawerOpen(false);
+    setError('');
+  }, [roomId, tableId]);
+
+  const add = (id) => setCart((c) => ({ ...c, [id]: (c[id] || 0) + 1 }));
+  const remove = (id) => setCart((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) - 1) }));
+
+  const totalQty = Object.values(cart).reduce((s, q) => s + q, 0);
+  const totalPrice = Object.entries(cart).reduce((s, [id, q]) => s + (menuById[id] ? menuById[id].price * q : 0), 0);
+
+  const submitOrder = async () => {
+    setSubmitting(true);
+    setError('');
+    try {
+      const newItems = Object.entries(cart)
+        .filter(([id, q]) => q > 0 && menuById[id])
+        .map(([id, q]) => ({
+          id, name: menuById[id].name, price: menuById[id].price, qty: q, status: 'pending',
+        }));
+      if (newItems.length === 0) {
+        setError('購物車是空的,請先加點餐點');
+        setSubmitting(false);
+        return;
+      }
+
+      const existing = await loadOrders();
+      let resultOrder;
+      let merged = false;
+
+      const targetIdx = activeOrderId ? existing.findIndex((o) => o.id === activeOrderId && !o.closed) : -1;
+      if (targetIdx !== -1) {
+        // 這桌已經有進行中的訂單,把新點的餐點加進去(視為新的一批,狀態各自從待處理開始)
+        const target = existing[targetIdx];
+        const mergedItems = [...target.items, ...newItems];
+        resultOrder = {
+          ...target,
+          items: mergedItems,
+          note: note ? (target.note ? `${target.note} / ${note}` : note) : target.note,
+          total: mergedItems.reduce((s, i) => s + i.price * i.qty, 0),
+          updatedAt: new Date().toISOString(),
+        };
+        const updated = existing.map((o, i) => (i === targetIdx ? resultOrder : o));
+        const saved = await saveOrders(updated);
+        if (!saved) throw new Error('儲存失敗');
+        merged = true;
+      } else {
+        // 沒有進行中的訂單(第一次點餐,或原訂單已經結帳),建立新訂單
+        resultOrder = {
+          id: `ord_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          roomId, roomName: room.name, tableId, seatLabel, seatNote: seatNote || '',
+          items: newItems, note, total: newItems.reduce((s, i) => s + i.price * i.qty, 0),
+          status: 'pending', closed: false, createdAt: new Date().toISOString(),
+        };
+        const updated = [resultOrder, ...existing];
+        const saved = await saveOrders(updated);
+        if (!saved) throw new Error('儲存失敗');
+      }
+
+      setCart({});
+      setNote('');
+      setDrawerOpen(false);
+      onOrdered(resultOrder, merged);
+    } catch (e) {
+      console.error('送出訂單失敗:', e);
+      let detail = '';
+      if (e) {
+        if (typeof e === 'string') detail = e;
+        else if (e.message) detail = e.message;
+        else { try { detail = JSON.stringify(e); } catch (_) { detail = String(e); } }
+      }
+      setError(`送出訂單時發生問題,請再試一次${detail ? `(${detail})` : ''}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="pb-28">
+      <div className="max-w-3xl mx-auto px-5 pt-6">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <button onClick={onBack} className="flex items-center gap-1.5" style={{ color: 'var(--olive)', fontFamily: 'var(--font-utility)', fontSize: 12.5 }}>
+            <ArrowLeft size={14} /> 更換座位
+          </button>
+          <button
+            onClick={() => setSwitchOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full"
+            style={{ background: 'var(--card)', border: '1px solid var(--line)', color: 'var(--ash)', fontFamily: 'var(--font-utility)', fontSize: 12 }}
+          >
+            <ArrowLeftRight size={13} /> 切換座位
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 mb-6">
+          <room.icon size={18} color={room.tint} />
+          <span style={{ fontFamily: 'var(--font-display)', fontSize: 17, color: 'var(--ash)' }}>{seatLabel}</span>
+          {activeOrderId && (
+            <span
+              className="px-2 py-0.5 rounded-full"
+              style={{ background: '#FBEFE6', color: 'var(--ember)', fontFamily: 'var(--font-utility)', fontSize: 10.5 }}
+            >
+              加點中
+            </span>
+          )}
+        </div>
+
+        <div className="flex gap-2 overflow-x-auto pb-1 mb-6" style={{ scrollbarWidth: 'none' }}>
+          {CATS.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => setActiveCat(c.id)}
+              className="px-4 py-2 rounded-full whitespace-nowrap"
+              style={{
+                fontFamily: 'var(--font-utility)', fontSize: 13,
+                background: activeCat === c.id ? 'var(--ash)' : 'var(--card)',
+                color: activeCat === c.id ? '#fff' : 'var(--ash)',
+                border: '1px solid var(--line)',
+              }}
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="space-y-3">
+          {MENU.filter((m) => m.cat === activeCat).map((item) => (
+            <MenuItemCard
+              key={item.id}
+              item={item}
+              qty={cart[item.id] || 0}
+              onAdd={() => add(item.id)}
+              onRemove={() => remove(item.id)}
+            />
+          ))}
+        </div>
+        {error && <div className="mt-4 text-sm" style={{ color: 'var(--ember)' }}>{error}</div>}
+      </div>
+
+      {totalQty > 0 && (
+        <button
+          onClick={() => setDrawerOpen(true)}
+          className="fixed bottom-6 left-1/2 -translate-x-1/2 px-6 py-3.5 rounded-full flex items-center gap-3 shadow-lg"
+          style={{ background: 'var(--ash)', color: '#fff' }}
+        >
+          <ShoppingCart size={17} />
+          <span style={{ fontFamily: 'var(--font-utility)', fontSize: 13.5 }}>{totalQty} 項 · {money(totalPrice)}</span>
+        </button>
+      )}
+
+      <CartDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        cart={cart}
+        menuById={menuById}
+        onAdd={add}
+        onRemove={remove}
+        note={note}
+        setNote={setNote}
+        onSubmit={submitOrder}
+        submitting={submitting}
+        seatLabel={seatLabel}
+        seatNote={seatNote}
+        error={error}
+      />
+
+      <QuickSwitchModal
+        open={switchOpen}
+        onClose={() => setSwitchOpen(false)}
+        currentRoomId={roomId}
+        currentTableId={tableId}
+        onSwitch={(rId, tId) => {
+          onSwitchTable(rId, tId);
+          setSwitchOpen(false);
+        }}
+      />
+    </div>
+  );
+}
+
+function Confirmation({ order, merged, onNewOrder }) {
+  return (
+    <div className="max-w-md mx-auto px-5 py-20 text-center">
+      <div className="w-16 h-16 rounded-full mx-auto flex items-center justify-center mb-6" style={{ background: '#EAEFE2' }}>
+        <CheckCircle2 size={30} color="var(--olive)" />
+      </div>
+      <div style={{ fontFamily: 'var(--font-display)', fontSize: 24, color: 'var(--ash)' }}>{merged ? '已加點成功' : '訂單已送出'}</div>
+      <p style={{ fontFamily: 'var(--font-body)', fontSize: 14, color: '#8a7e6f' }} className="mt-2">
+        {order.seatLabel} · 這桌目前共 {order.items.reduce((s, i) => s + i.qty, 0)} 項 · 累計 {money(order.total)}
+      </p>
+      <p style={{ fontFamily: 'var(--font-body)', fontSize: 13, color: '#a89b8a' }} className="mt-1">
+        餐點準備好後,服務人員將為您送上
+      </p>
+      <button
+        onClick={onNewOrder}
+        className="mt-8 px-6 py-3 rounded-full"
+        style={{ background: 'var(--ember)', color: '#fff', fontFamily: 'var(--font-utility)', fontSize: 13.5 }}
+      >
+        繼續加點
+      </button>
+    </div>
+  );
+}
+
+function CheckoutView({ orders, onClearAll, clearing }) {
+  const summary = computeCheckoutSummary(orders);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const catOrder = Object.keys(summary.catTotals).sort((a, b) => summary.catTotals[b].revenue - summary.catTotals[a].revenue);
+
+  if (orders.length === 0) {
+    return (
+      <div className="text-center py-20" style={{ color: '#a89b8a', fontFamily: 'var(--font-body)' }}>
+        目前還沒有任何訂單可以結算
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="rounded-xl p-5 mb-4" style={{ background: 'var(--ash)' }}>
+        <div style={{ fontFamily: 'var(--font-utility)', fontSize: 11, letterSpacing: '0.2em', color: '#C9BFA9' }}>今日總營收</div>
+        <div style={{ fontFamily: 'var(--font-display)', fontSize: 40, color: '#fff' }} className="mt-1">{money(summary.total)}</div>
+        <div className="flex gap-5 mt-3" style={{ fontFamily: 'var(--font-body)', fontSize: 12.5, color: '#C9BFA9' }}>
+          <span>{summary.orderCount} 張訂單</span>
+          <span>{summary.itemCount} 份餐點</span>
+        </div>
+      </div>
+
+      <div style={{ fontFamily: 'var(--font-utility)', fontSize: 11.5, color: 'var(--olive)' }} className="mb-2 tracking-wide">分類明細</div>
+      <div className="space-y-3 mb-6">
+        {catOrder.map((catId) => {
+          const cat = summary.catTotals[catId];
+          const items = Object.values(cat.items).sort((a, b) => b.revenue - a.revenue);
+          return (
+            <div key={catId} className="rounded-xl p-4" style={{ background: 'var(--card)', border: '1px solid var(--line)' }}>
+              <div className="flex items-center justify-between">
+                <span style={{ fontFamily: 'var(--font-display)', fontSize: 16, color: 'var(--ash)' }}>{CAT_LABEL[catId] || catId}</span>
+                <span style={{ fontFamily: 'var(--font-utility)', fontSize: 15, color: 'var(--gold-dark)' }}>{money(cat.revenue)}</span>
+              </div>
+              <div style={{ fontFamily: 'var(--font-body)', fontSize: 11.5, color: '#a89b8a' }} className="mb-2.5">共 {cat.qty} 份</div>
+              <div className="space-y-1">
+                {items.map((it, i) => (
+                  <div key={i} className="flex items-center justify-between" style={{ fontFamily: 'var(--font-body)', fontSize: 12.5, color: '#6b6154' }}>
+                    <span>{it.name} × {it.qty}</span>
+                    <span>{money(it.revenue)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="rounded-xl p-4" style={{ background: '#FBEFE6', border: '1px solid #E9C7AE' }}>
+        {!confirmClear ? (
+          <button
+            onClick={() => setConfirmClear(true)}
+            className="w-full py-2.5 rounded-full"
+            style={{ background: 'var(--ember)', color: '#fff', fontFamily: 'var(--font-utility)', fontSize: 13 }}
+          >
+            結束營業・清空所有訂單
+          </button>
+        ) : (
+          <div>
+            <p style={{ fontFamily: 'var(--font-body)', fontSize: 12.5, color: 'var(--ember)' }} className="mb-3">
+              確定要清空全部 {orders.length} 筆訂單嗎?清空後上面的營收記錄會歸零,且無法復原。
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirmClear(false)}
+                className="flex-1 py-2.5 rounded-full"
+                style={{ background: 'var(--card)', color: 'var(--ash)', border: '1px solid var(--line)', fontFamily: 'var(--font-utility)', fontSize: 13 }}
+              >
+                取消
+              </button>
+              <button
+                onClick={() => { onClearAll(); setConfirmClear(false); }}
+                disabled={clearing}
+                className="flex-1 py-2.5 rounded-full disabled:opacity-50"
+                style={{ background: 'var(--ember)', color: '#fff', fontFamily: 'var(--font-utility)', fontSize: 13 }}
+              >
+                {clearing ? '清空中…' : '確定清空'}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AdminAuthScreen({ onSuccess, onBack }) {
+  const [value, setValue] = useState('');
+  const [error, setError] = useState('');
+
+  const submit = () => {
+    if (value === ADMIN_PASSWORD) {
+      setError('');
+      onSuccess();
+    } else {
+      setError('密碼不正確,請再試一次');
+    }
+  };
+
+  return (
+    <div className="max-w-xs mx-auto px-5 py-24 text-center">
+      <div className="w-14 h-14 rounded-full mx-auto flex items-center justify-center mb-5" style={{ background: 'var(--limewash)' }}>
+        <Lock size={22} color="var(--ash)" />
+      </div>
+      <div style={{ fontFamily: 'var(--font-display)', fontSize: 20, color: 'var(--ash)' }} className="mb-1">後台密碼</div>
+      <p style={{ fontFamily: 'var(--font-body)', fontSize: 12.5, color: '#8a7e6f' }} className="mb-5">請輸入密碼以進入訂單管理後台</p>
+      <input
+        type="password"
+        inputMode="numeric"
+        value={value}
+        onChange={(e) => { setValue(e.target.value); setError(''); }}
+        onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+        autoFocus
+        className="w-full text-center rounded-lg px-3.5 py-3 text-lg tracking-[0.3em] focus:outline-none mb-3"
+        style={{ background: 'var(--card)', border: '1px solid var(--line)', fontFamily: 'var(--font-utility)', color: 'var(--ash)' }}
+      />
+      {error && <div className="mb-3 text-xs" style={{ color: 'var(--ember)' }}>{error}</div>}
+      <button
+        onClick={submit}
+        className="w-full py-3 rounded-full mb-3"
+        style={{ background: 'var(--ember)', color: '#fff', fontFamily: 'var(--font-utility)', fontSize: 13.5 }}
+      >
+        進入後台
+      </button>
+      <button
+        onClick={onBack}
+        className="flex items-center justify-center gap-1.5 mx-auto"
+        style={{ color: 'var(--olive)', fontFamily: 'var(--font-utility)', fontSize: 12 }}
+      >
+        <ArrowLeft size={13} /> 回到點餐畫面
+      </button>
+    </div>
+  );
+}
+
+function AdminScreen({ onBack, onSettle, onAllCleared }) {
+  const [orders, setOrders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [view, setView] = useState('orders'); // orders | checkout
+  const [clearing, setClearing] = useState(false);
+
+  // 即時訂閱:任何裝置(客人手機、其他店員後台)一有異動,這裡會自動收到最新資料
+  useEffect(() => {
+    setLoading(true);
+    const unsubscribe = subscribeOrders(
+      (list) => { setOrders(list); setLoading(false); setError(''); },
+      (err) => { setError('讀取訂單失敗,請檢查網路連線'); setLoading(false); console.error(err); }
+    );
+    return () => unsubscribe && unsubscribe();
+  }, []);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const list = await loadOrders();
+      setOrders(list);
+    } catch (e) {
+      setError('讀取訂單失敗,請檢查網路連線');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const clearAllOrders = async () => {
+    setClearing(true);
+    setError('');
+    try {
+      const ok = await saveOrders([]);
+      if (!ok) throw new Error('清空失敗');
+      setOrders([]);
+      if (onAllCleared) onAllCleared();
+    } catch (e) {
+      setError('清空訂單失敗,請重新整理再試');
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  const settleOrder = async (order) => {
+    const updated = orders.map((o) => (o.id === order.id ? { ...o, closed: true, closedAt: new Date().toISOString() } : o));
+    setOrders(updated);
+    try {
+      const ok = await saveOrders(updated);
+      if (!ok) throw new Error('儲存失敗');
+      // 結帳完成後,這一桌下次點餐要視為全新訂單,不再併入這張已結帳的訂單
+      if (onSettle) onSettle(order.roomId, order.tableId);
+    } catch (e) {
+      setError('結帳失敗,請重新整理再試');
+    }
+  };
+
+  const cycleItemStatus = async (orderId, itemIndex) => {
+    const oIdx = orders.findIndex((o) => o.id === orderId);
+    if (oIdx === -1) return;
+    const target = orders[oIdx];
+    const items = target.items.map((it, i) => {
+      if (i !== itemIndex) return it;
+      const current = it.status || 'pending';
+      const next = STATUS_FLOW[(STATUS_FLOW.indexOf(current) + 1) % STATUS_FLOW.length];
+      return { ...it, status: next };
+    });
+    const updated = orders.map((o, i) => (i === oIdx ? { ...o, items } : o));
+    setOrders(updated);
+    try {
+      const ok = await saveOrders(updated);
+      if (!ok) throw new Error('儲存失敗');
+    } catch (e) {
+      setError('更新狀態失敗,請重新整理再試');
+    }
+  };
+
+  const removeItem = async (orderId, itemIndex) => {
+    const oIdx = orders.findIndex((o) => o.id === orderId);
+    if (oIdx === -1) return;
+    const target = orders[oIdx];
+    const items = target.items.filter((_, i) => i !== itemIndex);
+    // 如果整張訂單的品項都被移除了,乾脆把這張訂單一起刪掉
+    const updated = items.length === 0
+      ? orders.filter((o) => o.id !== orderId)
+      : orders.map((o, i) => (i === oIdx ? { ...o, items, total: items.reduce((s, it) => s + it.price * it.qty, 0) } : o));
+    setOrders(updated);
+    try {
+      const ok = await saveOrders(updated);
+      if (!ok) throw new Error('儲存失敗');
+    } catch (e) {
+      setError('移除品項失敗,請重新整理再試');
+    }
+  };
+
+  const visible = filter === 'all' ? orders : orders.filter((o) => orderStatus(o) === filter);
+
+  return (
+    <div className="max-w-4xl mx-auto px-5 py-6 pb-16">
+      <div className="flex items-center justify-between mb-1">
+        <button onClick={onBack} className="flex items-center gap-1.5" style={{ color: 'var(--olive)', fontFamily: 'var(--font-utility)', fontSize: 12.5 }}>
+          <ArrowLeft size={14} /> 回到點餐畫面
+        </button>
+        <button onClick={load} className="flex items-center gap-1.5" style={{ color: 'var(--ash)', fontFamily: 'var(--font-utility)', fontSize: 12.5 }}>
+          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> 重新整理
+        </button>
+      </div>
+      <div className="flex items-center gap-2 mt-4 mb-2">
+        <ChefHat size={20} color="var(--ember)" />
+        <span style={{ fontFamily: 'var(--font-display)', fontSize: 22, color: 'var(--ash)' }}>後台訂單管理</span>
+      </div>
+
+      <div className="flex gap-2 mb-6">
+        <button
+          onClick={() => setView('orders')}
+          className="flex-1 py-2 rounded-full flex items-center justify-center gap-1.5"
+          style={{
+            fontFamily: 'var(--font-utility)', fontSize: 12.5,
+            background: view === 'orders' ? 'var(--ash)' : 'var(--card)',
+            color: view === 'orders' ? '#fff' : 'var(--ash)',
+            border: '1px solid var(--line)',
+          }}
+        >
+          <ChefHat size={13} /> 訂單管理
+        </button>
+        <button
+          onClick={() => setView('checkout')}
+          className="flex-1 py-2 rounded-full flex items-center justify-center gap-1.5"
+          style={{
+            fontFamily: 'var(--font-utility)', fontSize: 12.5,
+            background: view === 'checkout' ? 'var(--ash)' : 'var(--card)',
+            color: view === 'checkout' ? '#fff' : 'var(--ash)',
+            border: '1px solid var(--line)',
+          }}
+        >
+          <Receipt size={13} /> 結帳
+        </button>
+      </div>
+
+      {error && <div className="mb-4 text-sm" style={{ color: 'var(--ember)' }}>{error}</div>}
+
+      {view === 'checkout' ? (
+        <CheckoutView orders={orders} onClearAll={clearAllOrders} clearing={clearing} />
+      ) : (
+        <>
+      <div className="flex gap-2 mb-6 flex-wrap">
+        {[{ id: 'all', label: '全部' }, { id: 'pending', label: '新訂單' }, { id: 'preparing', label: '製作中' }, { id: 'done', label: '已完成' }].map((f) => (
+          <button
+            key={f.id}
+            onClick={() => setFilter(f.id)}
+            className="px-3.5 py-1.5 rounded-full"
+            style={{
+              fontFamily: 'var(--font-utility)', fontSize: 12.5,
+              background: filter === f.id ? 'var(--ash)' : 'var(--card)',
+              color: filter === f.id ? '#fff' : 'var(--ash)',
+              border: '1px solid var(--line)',
+            }}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+
+      {loading ? (
+        <div style={{ color: '#a89b8a', fontFamily: 'var(--font-body)' }}>載入中…</div>
+      ) : visible.length === 0 ? (
+        <div style={{ color: '#a89b8a', fontFamily: 'var(--font-body)' }} className="text-center py-20">目前沒有訂單</div>
+      ) : (
+        <div className="grid sm:grid-cols-2 gap-4">
+          {visible.map((o) => {
+            const agg = orderStatus(o);
+            const aggSt = STATUS_STYLE[agg];
+            const room = roomById[o.roomId];
+            return (
+              <div key={o.id} className="rounded-xl p-4" style={{ background: 'var(--card)', border: '1px solid var(--line)', opacity: o.closed ? 0.55 : 1 }}>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-1.5">
+                    {room && <room.icon size={14} color={room.tint} />}
+                    <span style={{ fontFamily: 'var(--font-utility)', fontSize: 12.5, color: 'var(--ash)' }}>{o.seatLabel || o.roomName}</span>
+                    {o.closed && (
+                      <span className="px-2 py-0.5 rounded-full" style={{ background: 'var(--limewash)', color: '#8a7e6f', fontFamily: 'var(--font-utility)', fontSize: 10 }}>
+                        已結帳
+                      </span>
+                    )}
+                  </div>
+                  <span style={{ fontFamily: 'var(--font-utility)', fontSize: 11, color: '#a89b8a' }}>
+                    {new Date(o.createdAt).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+                <div className="space-y-1.5 mb-3">
+                  {o.items.map((it, i) => {
+                    const itSt = STATUS_STYLE[it.status || 'pending'];
+                    return (
+                      <div key={i} className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="truncate" style={{ fontFamily: 'var(--font-body)', fontSize: 13.5, color: 'var(--ash)' }}>{it.name} × {it.qty}</div>
+                          <div style={{ fontFamily: 'var(--font-utility)', fontSize: 11, color: '#8a7e6f' }}>{money(it.price * it.qty)}</div>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            onClick={() => cycleItemStatus(o.id, i)}
+                            className="px-2.5 py-1 rounded-full flex items-center gap-1"
+                            style={{ background: itSt.bg, color: itSt.fg, border: `1px solid ${itSt.border}`, fontFamily: 'var(--font-utility)', fontSize: 10.5 }}
+                          >
+                            {(it.status || 'pending') === 'done' ? <CheckCircle2 size={11} /> : <Clock size={11} />}
+                            {ITEM_STATUS_LABEL[it.status || 'pending']}
+                          </button>
+                          {!o.closed && (
+                            <button
+                              onClick={() => removeItem(o.id, i)}
+                              className="w-6 h-6 rounded-full flex items-center justify-center"
+                              style={{ background: 'var(--limewash)', color: '#a4463a' }}
+                              aria-label={`移除 ${it.name}`}
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {o.seatNote && (
+                  <div className="flex items-start gap-1.5 mb-1.5 text-xs" style={{ color: 'var(--ember)', fontFamily: 'var(--font-body)' }}>
+                    <MapPin size={12} className="mt-0.5 shrink-0" /> {o.seatNote}
+                  </div>
+                )}
+                {o.note && (
+                  <div className="flex items-start gap-1.5 mb-3 text-xs" style={{ color: 'var(--olive)', fontFamily: 'var(--font-body)' }}>
+                    <StickyNote size={12} className="mt-0.5 shrink-0" /> {o.note}
+                  </div>
+                )}
+                <div className="flex items-center justify-between pt-2" style={{ borderTop: '1px dashed var(--line)' }}>
+                  <span style={{ fontFamily: 'var(--font-display)', fontSize: 16, color: 'var(--ash)' }}>{money(o.total)}</span>
+                  <span
+                    className="px-3 py-1.5 rounded-full flex items-center gap-1.5"
+                    style={{ background: aggSt.bg, color: aggSt.fg, border: `1px solid ${aggSt.border}`, fontFamily: 'var(--font-utility)', fontSize: 12 }}
+                  >
+                    {agg === 'done' ? <CheckCircle2 size={13} /> : <Clock size={13} />}
+                    整單:{STATUS_LABEL[agg]}
+                  </span>
+                </div>
+                {!o.closed && (
+                  <button
+                    onClick={() => settleOrder(o)}
+                    className="w-full mt-3 py-2 rounded-full flex items-center justify-center gap-1.5"
+                    style={{ background: 'var(--ash)', color: '#fff', fontFamily: 'var(--font-utility)', fontSize: 12.5 }}
+                  >
+                    <Receipt size={13} /> 結帳完成
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------
+   App
+--------------------------------------------------------------- */
+
+function App() {
+  const [page, setPage] = useState('floorplan'); // floorplan | tablepick | seatnote | menu | confirm | adminAuth | admin
+  const [roomId, setRoomId] = useState(null);
+  const [tableId, setTableId] = useState(null);
+  const [seatNote, setSeatNote] = useState('');
+  const [cart, setCart] = useState({});
+  const [lastOrder, setLastOrder] = useState(null);
+  const [lastOrderMerged, setLastOrderMerged] = useState(false);
+  // 每一桌各自追蹤「目前還能繼續加點的訂單 id」,key 是 roomId:tableId,這樣店員在不同桌之間切換時不會互相搞混
+  const [activeOrderIds, setActiveOrderIds] = useState({});
+  const [adminAuthed, setAdminAuthed] = useState(false);
+  const tableKey = (r, t) => `${r}:${t || ''}`;
+  const currentActiveOrderId = activeOrderIds[tableKey(roomId, tableId)] || null;
+
+  const switchTable = (rId, tId) => {
+    setRoomId(rId);
+    setTableId(tId);
+    setSeatNote('');
+    setCart({});
+  };
+
+  return (
+    <div style={{ minHeight: '100vh', background: 'var(--paper)' }}>
+      <style>{`
+        :root {
+          --ash: #2B2420;
+          --ember: #C1440E;
+          --olive: #6B7A4F;
+          --limewash: #EDE7D9;
+          --gold-dark: #9C6B18;
+          --paper: #F6F2E9;
+          --card: #FFFFFF;
+          --line: #E7DFCF;
+          --font-display: 'Fraunces', serif;
+          --font-body: 'Work Sans', sans-serif;
+          --font-utility: 'Space Mono', monospace;
+        }
+        * { box-sizing: border-box; }
+        button { cursor: pointer; }
+        button:focus-visible, textarea:focus-visible { outline: 2px solid var(--ember); outline-offset: 2px; }
+        @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+      `}</style>
+
+      <header className="sticky top-0 z-30 px-5 py-3.5 flex items-center justify-between" style={{ background: 'rgba(246,242,233,0.9)', backdropFilter: 'blur(6px)', borderBottom: '1px solid var(--line)' }}>
+        <Logo />
+        {page !== 'admin' && page !== 'adminAuth' && (
+          <button
+            onClick={() => setPage(adminAuthed ? 'admin' : 'adminAuth')}
+            className="text-xs px-3 py-1.5 rounded-full"
+            style={{ fontFamily: 'var(--font-utility)', color: 'var(--ash)', border: '1px solid var(--line)' }}
+          >
+            後台
+          </button>
+        )}
+      </header>
+
+      {page === 'floorplan' && (
+        <FloorPlanScreen onPickRoom={(id) => {
+          setRoomId(id);
+          setSeatNote('');
+          const room = roomById[id];
+          if (room.noTableSelect) { setTableId(null); setPage('seatnote'); }
+          else { setPage('tablepick'); }
+        }} />
+      )}
+
+      {page === 'tablepick' && (
+        <TablePickScreen
+          roomId={roomId}
+          onBack={() => setPage('floorplan')}
+          onPickTable={(rId, tId) => { setRoomId(rId); setTableId(tId); setPage('seatnote'); }}
+        />
+      )}
+
+      {page === 'seatnote' && (
+        <SeatNoteScreen
+          roomId={roomId}
+          tableId={tableId}
+          value={seatNote}
+          onChange={setSeatNote}
+          onBack={() => {
+            const room = roomById[roomId];
+            setPage(room && room.noTableSelect ? 'floorplan' : 'tablepick');
+          }}
+          onContinue={() => setPage('menu')}
+        />
+      )}
+
+      {page === 'menu' && (
+        <OrderScreen
+          roomId={roomId}
+          tableId={tableId}
+          seatNote={seatNote}
+          cart={cart}
+          setCart={setCart}
+          activeOrderId={currentActiveOrderId}
+          onSwitchTable={switchTable}
+          onBack={() => {
+            setPage('seatnote');
+            setCart({});
+          }}
+          onOrdered={(order, merged) => {
+            setLastOrder(order);
+            setLastOrderMerged(merged);
+            setActiveOrderIds((m) => ({ ...m, [tableKey(order.roomId, order.tableId)]: order.id }));
+            setPage('confirm');
+          }}
+        />
+      )}
+
+      {page === 'confirm' && lastOrder && (
+        <Confirmation order={lastOrder} merged={lastOrderMerged} onNewOrder={() => setPage('menu')} />
+      )}
+
+      {page === 'adminAuth' && (
+        <AdminAuthScreen
+          onSuccess={() => { setAdminAuthed(true); setPage('admin'); }}
+          onBack={() => setPage('floorplan')}
+        />
+      )}
+
+      {page === 'admin' && adminAuthed && (
+        <AdminScreen
+          onBack={() => setPage('floorplan')}
+          onSettle={(rId, tId) => {
+            setActiveOrderIds((m) => {
+              const key = tableKey(rId, tId);
+              if (!(key in m)) return m;
+              const next = { ...m };
+              delete next[key];
+              return next;
+            });
+          }}
+          onAllCleared={() => setActiveOrderIds({})}
+        />
+      )}
+    </div>
+  );
+}
+
+createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
